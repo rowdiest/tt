@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Time Tracker.
+# Track Time.
 
 # Config.
 readonly TTDIR="$HOME/.cache/tt";
@@ -487,7 +487,7 @@ main() {
   [[ -d "$TTRUNDIR" ]] || mkdir -p "$TTRUNDIR";
 
   # Opts.
-  case "$1" in
+  case "${1:-}" in
     -l)          listTimers                     ;;
     -n)          newTimer    "${2:-}"           ;;
     --remove)    removeTimer "${2:-}"           ;;
@@ -501,6 +501,7 @@ main() {
     -H)          showHours   "${2:-}"           ;;
     -b)          dwmblocksModule                ;;
     --help)      usage                          ;;
+    '')          err "No options."              ;;
     *)           err "No such option."          ;;
   esac
 }
