@@ -1,0 +1,509 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Time Tracker.
+
+# Config.
+readonly TTDIR="$HOME/.cache/tt";
+readonly TTRUNDIR="$TTDIR/run";
+readonly TIMERSFILE="$TTDIR/timers";
+readonly HISTORYFILE="$TTDIR/history";
+
+# Throws an error.
+err() {
+  local error_msg="$1";
+  echo -e "tt error: $error_msg" >&2;
+  exit 1;
+}
+
+# Converts seconds (integer) to time in format DAYd HH:MM:SS.
+# Args: seconds
+seconds2time() {
+  local T D H M S;
+  T="$1";
+  D="$((T/60/60/24))";
+  H="$((T/60/60%24))";
+  M="$((T/60%60))";
+  S="$((T%60))";
+
+  # Zero prefix.
+  [[ "$H" =~ ^[[:digit:]]$ ]] && H="0$H";
+  [[ "$M" =~ ^[[:digit:]]$ ]] && M="0$M";
+  [[ "$S" =~ ^[[:digit:]]$ ]] && S="0$S";
+
+  # Days.
+  [[ "$D" -eq 0 ]] && D='';
+  [[ "$D" -gt 0 ]] && D="${D}d ";
+
+  # Return.
+  echo -e "$D$H:$M:$S";
+
+  return 0;
+}
+
+listTimers () {
+  if [[ -s "$TIMERSFILE" ]]; then
+    cat "$TIMERSFILE";
+  else
+    echo -e "No timers.";
+  fi
+
+  return 0;
+}
+
+newTimer () {
+  local name="$1";
+  [[ -z "$name" ]] && err "Usage: tt -n TIMER_NAME.";
+    
+  # Set ID.
+  local id;
+  if [[ -f "$TIMERSFILE" ]]; then
+    local id_col last_id;
+    id_col="$(cut -f 1 "$TIMERSFILE" | sort -n)"; 
+    last_id="$(tail -n 1 <<< "$id_col")";
+    id="$(( last_id + 1 ))";
+  else
+    id=1;
+  fi
+
+  # Write.
+  if echo -e "$id\t$name" >> "$TIMERSFILE"; then
+    echo -e "Timer $name was created.";
+  fi
+
+  return 0;
+}
+
+removeTimer () {
+  local id="$1";
+
+  # Check if timersfile exists.
+  [[ -f "$TIMERSFILE" ]] || { 
+    echo "No timers."; 
+    return 0;
+  }
+
+  # Delete.
+  if grep -q -P "^$id\t" "$TIMERSFILE" &> /dev/null; then
+    local name;
+    name="$(sed -n -e "/^$id\t/p" "$TIMERSFILE" | cut -f2)";
+    
+    # Confirm.
+    read -p "Remove $name? All history will be lost! (y)? ";
+
+    # Do it.
+    [[ "$REPLY" == 'y' ]] &&
+    sed -i -e "/^$id\t/d" "$TIMERSFILE" \
+      && sed -i -e "/^$id\t/d" "$HISTORYFILE" \
+      && echo -e "Timer $name was deleted.";
+  else 
+    echo "No such timer."; 
+  fi
+}
+
+startTimer () {
+  local id="$1";
+  [[ -z "$id" ]] && err "Usage: tt -S TIMER_ID.";
+
+  # Check if timer exists.
+  grep -q -P "^$id\t" "$TIMERSFILE" &> /dev/null \
+    || err "No such timer."; 
+
+  # Check if already running.
+  if [[ -f "$TTRUNDIR/$id/status" ]]; then
+    err "This timer is already running.";
+  fi
+
+  # Get timer name.
+  local name;
+  name="$(sed -n -e "/^$id\t/p" "$TIMERSFILE" | cut -f2)";
+
+  # Start.
+  [[ -d "$TTRUNDIR/$id" ]] || mkdir -p "$TTRUNDIR/$id";
+  echo -ne "$(date '+%s')" > "$TTRUNDIR/$id/start";
+  echo -ne "RUNNING" > "$TTRUNDIR/$id/status";
+  echo -ne "0" > "$TTRUNDIR/$id/pauses";
+  echo -e "Timer $name started.";
+
+  return 0;
+}
+
+showTimer () {
+  local id="$1";
+
+  # If no id, show all.
+  if [[ -z "$id" ]]; then
+    local running running_arr run_id;
+    running="$(ls -d "$TTRUNDIR"/* 2> /dev/null)";
+    readarray -t running_arr < <(echo -e "$running");
+    for run_id in "${running_arr[@]}"; do
+      showTimer "$(basename "$run_id")";
+    done
+    return 0;
+  fi
+
+  # Check if timer exists.
+  grep -q -P "^$id\t" "$TIMERSFILE" &> /dev/null \
+    || err "No such timer."; 
+  
+  # Get timer name.
+  local name;
+  name="$(sed -n -e "/^$id\t/p" "$TIMERSFILE" | cut -f2)";
+
+  # Now.
+  local now display;
+  now="$(date '+%s')";
+
+  # Check if timer is running.
+  # And get timer start/pauses and status.
+  if [[ -f "$TTRUNDIR/$id/status" ]]; then
+    local timer_status timer_start pauses=0;
+
+    # Get status and start.
+    timer_status="$(cat "$TTRUNDIR/$id/status")";
+    timer_start="$(cat "$TTRUNDIR/$id/start")";
+
+    # If there is paused time, get it.
+    if [[ -f "$TTRUNDIR/$id/pauses" ]]; then
+      pauses="$(cat "$TTRUNDIR/$id/pauses")";
+    fi
+
+    # If timer is stopped, 
+    if [[ "$timer_status" == 'STOPPED' ]]; then
+      local timer_stop paused_for;
+      timer_stop="$(cat "$TTRUNDIR/$id/stop")";
+      paused_for="$(( now - timer_stop))";
+      pauses="$(( pauses + paused_for ))"; 
+    fi
+  else
+    err "Timer is not even running.";
+  fi
+  
+  # Calc.
+  display="$(( now - timer_start - pauses ))";
+  display="$(seconds2time "$display")";  
+
+  # Show.
+  [[ -d "$TTRUNDIR/$id" ]] || mkdir -p "$TTRUNDIR/$id";
+  echo -e "$id/$name: ($display) [$timer_status]";
+}
+
+pauseTimer () {
+  local id="$1";
+
+  # If only one timer running, pause it.
+  # If multiple timers, errors and ask for ID.
+  if ls "$TTRUNDIR/"* &> /dev/null && [[ -z "$id" ]]; then
+    local timers timers_count;
+    timers="$(showTimer '')";
+    timers_count="$(wc -l <<< "$timers")";
+    
+    if [[ "$timers_count" -eq 1 ]]; then
+      local timer_id;
+      timer_id="$(cut -d/ -f1 <<< "$timers")";
+      pauseTimer "$timer_id";
+      return 0;
+    elif [[ "$timers_count" -gt 1 ]]; then
+      err "More than one timer are running, specify by ID. Usage: tt -p TIMER_ID.";
+    fi
+  fi
+
+  # Check if timer exists.
+  grep -q -P "^$id\t" "$TIMERSFILE" &> /dev/null \
+    || err "No such timer."; 
+
+  # Check if timer is running.
+  if [[ -f "$TTRUNDIR/$id/status" ]]; then
+    local timer_status;
+    timer_status="$(cat "$TTRUNDIR/$id/status")";
+    if [[ "$timer_status" == 'STOPPED' ]]; then
+      err "Timer is already paused.";
+    fi
+  else
+    err "Timer is not even running.";
+  fi
+
+  # Get timer name.
+  local name;
+  name="$(sed -n -e "/^$id\t/p" "$TIMERSFILE" | cut -f2)";
+
+  # Pause.
+  [[ -d "$TTRUNDIR/$id" ]] || mkdir -p "$TTRUNDIR/$id";
+  echo -ne "$(date '+%s')" > "$TTRUNDIR/$id/stop";
+  echo -ne "STOPPED" > "$TTRUNDIR/$id/status";
+  echo -e "Timer $name is now paused.";
+}
+
+resumeTimer () {
+  local id="$1";
+
+  # If only one timer running, pause it.
+  # If multiple timers, errors and ask for ID.
+  if ls "$TTRUNDIR/"* &> /dev/null && [[ -z "$id" ]]; then
+    local timers timers_count;
+    timers="$(showTimer '')";
+    timers_count="$(wc -l <<< "$timers")";
+    
+    if [[ "$timers_count" -eq 1 ]]; then
+      local timer_id;
+      timer_id="$(cut -d/ -f1 <<< "$timers")";
+      resumeTimer "$timer_id";
+      return 0;
+    elif [[ "$timers_count" -gt 1 ]]; then
+      err "More than one timer are running, specify by ID. Usage: tt -r TIMER_ID.";
+    fi
+  fi
+
+  # Check if timer exists.
+  grep -q -P "^$id\t" "$TIMERSFILE" &> /dev/null \
+    || err "No such timer."; 
+
+  # Check if timer is running.
+  if [[ -f "$TTRUNDIR/$id/status" ]]; then
+    local timer_status;
+    timer_status="$(cat "$TTRUNDIR/$id/status")";
+    if [[ "$timer_status" == 'RUNNING' ]]; then
+      err "Timer is not paused.";
+    fi
+  else
+    err "Timer is not even running.";
+  fi
+
+  # Now.
+  local now;
+  now="$(date '+%s')";
+  
+  # Calc.
+  local timer_stop paused_for pauses;  
+  timer_stop="$(cat "$TTRUNDIR/$id/stop")";
+  paused_for="$(( now - timer_stop ))";
+  pauses="$(cat "$TTRUNDIR/$id/pauses")";
+  
+  # Add seconds to pauses.
+  pauses="$(( pauses + paused_for))";
+
+  # Get timer name.
+  local name;
+  name="$(sed -n -e "/^$id\t/p" "$TIMERSFILE" | cut -f2)";
+
+  # Resume.
+  [[ -d "$TTRUNDIR/$id" ]] || mkdir -p "$TTRUNDIR/$id";
+  echo -ne "RUNNING" > "$TTRUNDIR/$id/status";
+  echo -ne "$pauses" > "$TTRUNDIR/$id/pauses";
+  rm "$TTRUNDIR/$id/stop";
+  echo -e "Timer $name is now running.";
+}
+
+finishTimer () {
+  local id="$1";
+  local save="$2";
+
+  # If only one timer running, pause it.
+  # If multiple timers, errors and ask for ID.
+  if ls "$TTRUNDIR/"* &> /dev/null && [[ -z "$id" ]]; then
+    local timers timers_count;
+    timers="$(showTimer '')";
+    timers_count="$(wc -l <<< "$timers")";
+    
+    if [[ "$timers_count" -eq 1 ]]; then
+      local timer_id;
+      timer_id="$(cut -d/ -f1 <<< "$timers")";
+      finishTimer "$timer_id" "$save";
+      return 0;
+    elif [[ "$timers_count" -gt 1 ]]; then
+      err "More than one timer are running, specify by ID. Usage: tt [-f|--discard] TIMER_ID.";
+    fi
+  fi
+
+  # Now.
+  local now;
+  now="$(date '+%s')";
+  
+  # Check if timer exists.
+  grep -q -P "^$id\t" "$TIMERSFILE" &> /dev/null \
+    || err "No such timer."; 
+
+  # Check if timer is running.
+  if ! [[ -f "$TTRUNDIR/$id/status" ]]; then
+    err "This timer was not even started.";
+  fi
+
+  # Get timer name.
+  local name;
+  name="$(sed -n -e "/^$id\t/p" "$TIMERSFILE" | cut -f2)";
+
+  # Confirm.
+  read -p "Finish $name (y)? ";
+  [[ "$REPLY" == 'y' ]] || {
+    echo -e "Canceled.";
+    return 0;
+  }
+  
+  # Resume if stopped.
+  if [[ "$(cat "$TTRUNDIR/$id/status")" == 'STOPPED' ]]; then
+    resumeTimer "$id";
+  fi
+
+  # Finish.
+  local timer_start timer_finish pauses;
+  
+  timer_start="$(cat "$TTRUNDIR/$id/start")";
+  timer_finish="$now";  
+  pauses="$(cat "$TTRUNDIR/$id/pauses")";
+
+  # Save.
+  if [[ "$save" == '--save' ]]; then
+    echo -e "$id\t$timer_start\t$timer_finish\t$pauses" >> "$TTDIR/history";
+    echo -e "$name's session was saved.";
+  else
+    echo -e "$name's session was discarted.";
+  fi
+
+  # Clean.
+  rm "$TTRUNDIR/$id/"*;
+  rmdir "$TTRUNDIR/$id";
+}
+
+showHistory () {
+  local id="$1";
+  local only_secs="${2:-}";
+  local hist;
+
+  # Check if history exists and is not empty.
+  [[ -f "$TTDIR/history" ]] && [[ ! -s "$TTDIR/history" ]] && {
+    echo -e "No records.";
+    exit 0;
+  }
+  
+  # All of specific?
+  if [[ -z "$id" ]]; then
+    hist="$(cat "$TTDIR/history")";
+  else
+    hist="$(grep -P "^$id\t" "$TTDIR/history")";
+  fi
+
+  local record;
+  readarray -t histarr < <(echo -e "$hist");
+  for record in "${histarr[@]}"; do
+    # Decompose fields.
+    local record_id timer_start timer_finish pauses;
+    record_id="$(cut -f 1 <<< "$record")";
+    timer_start="$(cut -f 2 <<< "$record")";
+    timer_finish="$(cut -f 3 <<< "$record")";
+    pauses="$(cut -f 4 <<< "$record")";
+
+    # Get timer name.
+    local name;
+    name="$(sed -n -e "/^$record_id\t/p" "$TIMERSFILE" | cut -f2)";
+
+    # When.
+    local date;
+    date="$(date -d @"$timer_start" '+%A %d/%b/%Y')";
+
+    # Time.
+    local time;
+    time="$(( timer_finish - timer_start - pauses ))";
+
+    # Only seconds.
+    if [[ "$only_secs" == '--only-secs' ]]; then
+      echo "$time";
+      continue;
+    fi
+
+    # Format time.    
+    time="$(seconds2time "$time")";
+
+    # Show.
+    echo -e "[$date] $name: $time";
+  done
+}
+
+showHours () {
+  local id="$1";
+  [[ -z "$id" ]] && err "Usage: tt -H TIMER_ID.";
+  local hours=0;
+
+  # Check it there are timers.
+  [[ -f "$TTDIR/timers" ]] || {
+    echo -e "No timers.";
+    exit 0;
+  }
+
+  # Check if history exists and is not empty.
+  [[ -f "$TTDIR/history" ]] && [[ ! -s "$TTDIR/history" ]] && {
+    echo -e "No records.";
+    exit 0;
+  }
+  
+  # Get timer name.
+  local name;
+  name="$(sed -n -e "/^$id\t/p" "$TIMERSFILE" | cut -f2)";
+
+  # Sum.
+  local record records;
+  readarray -t records < <(showHistory "$id" --only-secs);
+  for record in "${records[@]}"; do
+    hours="$(( hours + record ))";
+  done
+
+  # Show.
+  echo "$name's acumulated hours: $(seconds2time "$hours")"
+}
+
+dwmblocksModule () {
+  if ls "$TTRUNDIR/"* &> /dev/null; then
+    local timers timers_count;
+    timers="$(showTimer '')";
+    timers_count="$(wc -l <<< "$timers")";
+    
+    if [[ "$timers_count" -eq 1 ]]; then
+      local timer_status;
+      timer_status="$(sed -e 's/^.*\[\(.*\)\]$/\1/g' <<< "$timers")";
+      echo -e "🕓$timer_status";
+    elif [[ "$timers_count" -gt 1 ]]; then
+      echo -e "🕓$timers_count";
+    fi
+  fi
+}
+
+usage () {
+  cat << EOF
+  -l          List timers.                    
+  -n          New timer.    
+  --remove    Remove timer.
+  -S          Start timer.
+  -s          Show timer.
+  -p          Pause timer.
+  -r          Resume timer.
+  -f          Finish timer.
+  --discard   Finish timer without saving.
+  -h          Show history.
+  -H          Show acumulated hours.
+  -b       Status for statusbar.
+  --help      This help.
+EOF
+}
+
+main() {
+  [[ -d "$TTRUNDIR" ]] || mkdir -p "$TTRUNDIR";
+
+  # Opts.
+  case "$1" in
+    -l)          listTimers                     ;;
+    -n)          newTimer    "${2:-}"           ;;
+    --remove)    removeTimer "${2:-}"           ;;
+    -S)          startTimer  "${2:-}"           ;;
+    -s)          showTimer   "${2:-}"           ;;
+    -p)          pauseTimer  "${2:-}"           ;;
+    -r)          resumeTimer "${2:-}"           ;;
+    -f)          finishTimer "${2:-}" --save    ;;
+    --discard)   finishTimer "${2:-}" --no-save ;;
+    -h)          showHistory "${2:-}"           ;;
+    -H)          showHours   "${2:-}"           ;;
+    -b)          dwmblocksModule                ;;
+    --help)      usage                          ;;
+    *)           err "No such option."          ;;
+  esac
+}
+
+main "$@";
+
