@@ -1,1 +1,1 @@
-Track Timer is a shell script that implements timers.
+Track Time is a shell script that implements timers.
