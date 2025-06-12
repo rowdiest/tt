@@ -184,7 +184,7 @@ showTimer () {
 
   # Show.
   [[ -d "$TTRUNDIR/$id" ]] || mkdir -p "$TTRUNDIR/$id";
-  echo -e "$id/$name: ($display) [$timer_status]";
+  printf '%-20s [%s/%s] %3.d\n' "$name" "$display" "$timer_status" "$id";
 }
 
 pauseTimer () {
@@ -296,6 +296,7 @@ resumeTimer () {
 finishTimer () {
   local id="$1";
   local save="$2";
+  local yes="${3:---no}";
 
   # If only one timer running, pause it.
   # If multiple timers, errors and ask for ID.
@@ -332,11 +333,13 @@ finishTimer () {
   name="$(sed -n -e "/^$id\t/p" "$TIMERSFILE" | cut -f2)";
 
   # Confirm.
-  read -p "Finish $name (y)? ";
-  [[ "$REPLY" == 'y' ]] || {
-    echo -e "Canceled.";
-    return 0;
-  }
+  if [[ "$yes" != '--yes' ]]; then
+    read -p "Finish $name (y)? ";
+    [[ "$REPLY" == 'y' ]] || {
+      echo -e "Canceled.";
+      return 1;
+    }
+  fi
   
   # Resume if stopped.
   if [[ "$(cat "$TTRUNDIR/$id/status")" == 'STOPPED' ]]; then
@@ -456,12 +459,93 @@ dwmblocksModule () {
     timers_count="$(wc -l <<< "$timers")";
     
     if [[ "$timers_count" -eq 1 ]]; then
-      local timer_status;
-      timer_status="$(sed -e 's/^.*\[\(.*\)\]$/\1/g' <<< "$timers")";
-      echo -e "🕓$timer_status";
+      local timer_status_dwm;
+      timers="$(tr -s ' ' <<< "$timers")";
+      timer_status_dwm="$(grep -o '\[.*\]' <<< "$timers" \
+        | tr -d '[]' \
+        | cut -d/ -f2)";
+      echo -e "⏰(${timer_status_dwm:0:1})";
     elif [[ "$timers_count" -gt 1 ]]; then
-      echo -e "🕓$timers_count";
+      echo -e "⏰$timers_count";
     fi
+  fi
+}
+
+dmenuInterface() {
+  local option;
+  option="$(echo -ne "$("$0" -s)\n🆕 Start Timer\n👀 Show Running Timers" \
+     | sed '/^$/d' \
+     | dmenu -c -l 15 -p "⏰ Track Time ")";
+
+  if [[ "$option" == '🆕 Start Timer' ]]; then
+    local timer timer_id timer_name;
+    timer="$(listTimers \
+      | tr '\t' ' ' \
+      | dmenu -c -l 15 -p "⏰ Start Timer ")"; 
+    timer_id="$(cut -d' ' -f1 <<< "$timer")";
+    timer_name="${timer#* }";
+
+    # Try to start the timer.
+    local err;
+    if err="$("$0" -S "$timer_id" 2>&1)"; then
+      notify.sh --suc "⏰ Track Time" "✅ Started $timer_name.";
+      exit 0;
+    else
+      notify.sh --err "⏰ Track Time" "❌ Failed: $err";
+      exit 1;
+    fi
+  
+  # Select a running timer and do something to it.
+  elif [[ "$option" == '👀 Show Running Timers' ]]; then
+    notify.sh --def "⏰ Track Time" "$(showTimer '')";
+  else
+    local timer_id timer_name timer_status;
+    option="$(tr -s ' ' <<< "$option")";
+    timer_id="${option#* \[*/*\] }";
+    timer_id="$(tr -d ' ' <<< "$timer_id")";
+    timer_name="$(tr -s ' ' <<< "${option% *}")";
+    timer_status="$(grep -o '\[.*/.*\]' <<< "$option")";
+    
+    if grep -q 'RUNNING' <<< "$timer_status"; then
+      local pause_resume='Pause';    
+    else
+      local pause_resume='Resume';    
+    fi
+
+    # Show options.
+    local operation;
+    operation="$(echo -ne "👀 Show\n🔘 $pause_resume\n💾 Finish\n🗑️ Discard" \
+      | dmenu -c -l 15 -p "⏰ $timer_status ")"; 
+
+    operation="${operation#* }";
+
+    case "$operation" in
+      Show)    notify.sh --def "⏰ Track Time" "$(showTimer "$timer_id")" ;;
+      Pause)   
+        if err="$(pauseTimer "$timer_id")"; then 
+          notify.sh --suc "⏰ Track Time" "🔘 Timer was paused."; 
+        else
+          notify.sh --err "⏰ Track Time" "❌ Failed: $err"; 
+        fi ;;
+      Resume)
+        if err="$(resumeTimer "$timer_id")"; then 
+          notify.sh --suc "⏰ Track Time" "🔘 Timer was resumed."; 
+        else
+          notify.sh --err "⏰ Track Time" "❌ Failed: $err"; 
+        fi ;;
+      Finish) 
+        if err="$(finishTimer "$timer_id" --save --yes)"; then 
+          notify.sh --suc "⏰ Track Time" "💾 Timer was finished and saved."; 
+        else
+          notify.sh --err "⏰ Track Time" "❌ Failed: $err"; 
+        fi ;;
+      Discard)
+        if err="$(finishTimer "$timer_id" --no-save --yes)"; then 
+          notify.sh --suc "⏰ Track Time" "🗑 Timer was discarted."; 
+        else
+          notify.sh --err "⏰ Track Time" "❌ Failed: $err"; 
+        fi ;;
+    esac
   fi
 }
 
@@ -478,7 +562,8 @@ usage () {
   --discard   Finish timer without saving.
   -h          Show history.
   -H          Show acumulated hours.
-  -b       Status for statusbar.
+  -b          Status for statusbar.
+  -d          Dmenu interface.
   --help      This help.
 EOF
 }
@@ -500,6 +585,7 @@ main() {
     -h)          showHistory "${2:-}"           ;;
     -H)          showHours   "${2:-}"           ;;
     -b)          dwmblocksModule                ;;
+    -d)          dmenuInterface                 ;;
     --help)      usage                          ;;
     '')          err "No options."              ;;
     *)           err "No such option."          ;;
